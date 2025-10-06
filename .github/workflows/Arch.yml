@@ -12,13 +12,16 @@ jobs:
           # Update mirrors and install packages
           pacman -Sy --noconfirm archlinux-keyring
           pacman -Syu --noconfirm --needed base-devel git openssh inetutils screen curl unzip tar binutils findutils gcc
+          echo "keyserver keyserver.ubuntu.com" >> /etc/pacman.d/gnupg/gpg.conf
           
-          # Suppress systemd hook warnings
+          # Suppress systemd issues
           sed -i '/SystemCallFilter/d' /usr/lib/systemd/system/systemd-tmpfiles-setup.service
           
-          # Create user
+          # Proper user setup
           useradd -m -G wheel -s /bin/bash builder
           echo "builder ALL=(ALL:ALL) NOPASSWD: ALL" >> /etc/sudoers
+          mkdir -p /home/builder
+          chown -R builder:builder /home/builder
           
           # Set password
           echo -e "1234\n1234" | passwd builder
@@ -26,16 +29,12 @@ jobs:
           # Set hostname without systemd
           echo "arch0xff" > /etc/hostname
           hostname arch0xff
-          
-          # Create .bashrc template
-          touch /home/builder/.bashrc
 
-      - name: Configure shell environment
+      - name: Configure .bashrc
         run: |
-          sudo -u builder bash -c 'git clone https://github.com/ammar0xff/GitHub_Machines repo-temp'
-          mv /home/builder/repo-temp/.github/workflows/.bashrc /home/builder/.bashrc
+          # Download .bashrc directly to user's home
+          sudo -u builder curl -sSfL "https://raw.githubusercontent.com/ammar0xff/GitHub_Machines/main/.github/workflows/.bashrc" -o /home/builder/.bashrc
           chown builder:builder /home/builder/.bashrc
-          rm -rf /home/builder/repo-temp
 
       - name: Install remote access tools
         run: |
@@ -43,11 +42,13 @@ jobs:
           curl -sSfL "https://github.com/yudai/gotty/releases/download/v1.0.1/gotty_linux_amd64.tar.gz" -o /tmp/gotty.tar.gz
           tar -xzf /tmp/gotty.tar.gz -C /usr/bin
           rm /tmp/gotty.tar.gz
+          chmod +x /usr/bin/gotty
           
           # Install Ngrok
           curl -sSfL "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz" -o /tmp/ngrok.tgz
           tar -xzf /tmp/ngrok.tgz -C /usr/bin
           rm /tmp/ngrok.tgz
+          chmod +x /usr/bin/ngrok
           ngrok config add-authtoken ${{ secrets.NGROK_TOKEN }}
 
       - name: Launch services
@@ -57,12 +58,12 @@ jobs:
           
           # Start Ngrok tunnel
           ngrok http 8080 --log=stdout --domain=${{ secrets.NGROK_DOMAIN }} > /var/log/ngrok.log 2>&1 &
-          sleep 5  # Allow services to start
+          sleep 5
           
-          # Print connection info (masked in logs)
+          # Print connection info
           echo "Web Terminal URL: https://${{ secrets.NGROK_DOMAIN }}"
           echo "User: builder"
           echo "Password: 1234"
 
       - name: Maintain session
-        run: sleep 4h  # Max 6h GitHub limit
+        run: sleep 4h
