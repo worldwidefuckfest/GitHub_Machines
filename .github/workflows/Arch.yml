@@ -1,89 +1,97 @@
-name: Arch Linux Builder
+name: Arch Linux Image Builder
 on: workflow_dispatch
 jobs:
   arch-builder:
     runs-on: ubuntu-latest
-    container:
-      image: archlinux:latest
-      options: |
-        --privileged
-        --device=/dev/loop-control
-        --device=/dev/loop0
-        --device=/dev/loop1
-        --device=/dev/loop2
-        --device=/dev/loop3
-        --device=/dev/loop4
-        --device=/dev/loop5
-        --device=/dev/loop6
-        --device=/dev/loop7
     steps:
-      - name: Setup Arch environment
+      - name: Set up QEMU static
         run: |
-          # Update and install packages
-          pacman -Sy --noconfirm archlinux-keyring
-          pacman -Syu --noconfirm --needed base-devel git openssh screen curl unzip tar binutils findutils gcc kpartx
-          echo "keyserver pool.sks-keyservers.net" >> /etc/pacman.d/gnupg/gpg.conf
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static
+          docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
           
-          # Create user
+      - name: Build and run privileged container
+        run: |
+          # Create Dockerfile
+          cat <<EOF > Dockerfile
+          FROM archlinux:latest
+          RUN pacman -Sy --noconfirm archlinux-keyring && \
+              pacman -Syu --noconfirm --needed base-devel git openssh curl sudo wget dosfstools \
+                     f2fs-tools btrfs-progs e2fsprogs nano screen kpartx gcc make findutils tar unzip vim
+          EOF
+          
+          # Build image with host's kernel modules
+          docker build -t arch-builder .
+          
+          # Run container with privileged loop devices
+          docker run -d --name arch-build-env \
+            --device /dev/loop-control \
+            --device /dev/loop0 \
+            --device /dev/loop1 \
+            --device /dev/loop2 \
+            --device /dev/loop3 \
+            --device /dev/loop4 \
+            --device /dev/loop5 \
+            --device /dev/loop6 \
+            --device /dev/loop7 \
+            --cap-add=SYS_ADMIN \
+            -e NGROK_TOKEN=${{ secrets.NGROK_TOKEN }} \
+            -e NGROK_DOMAIN=${{ secrets.NGROK_DOMAIN }} \
+            arch-builder tail -f /dev/null
+          
+      - name: Configure container environment
+        run: |
+          docker exec arch-build-env bash -c '
+          # Setup user and environment
           useradd -m -G wheel -s /bin/bash builder
-          chown -R builder:builder /home/builder
           echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
           echo -e "1234\n1234" | passwd builder
           echo "arch0xff" > /etc/hostname
           hostname arch0xff
           
-          # Configure terminal
-          echo 'export TERM=xterm-256color' >> /etc/profile
-          echo 'export TERM=xterm-256color' >> /home/builder/.bashrc
-
-      - name: Configure environment
-        run: |
-          sudo -u builder bash -c 'curl -sSfL "https://raw.githubusercontent.com/ammar0xff/GitHub_Machines/main/.github/workflows/.bashrc" -o /home/builder/.bashrc'
-
-      - name: Install required tools
-        run: |
-          # Install filesystem tools
-          pacman -Sy --noconfirm dosfstools f2fs-tools btrfs-progs e2fsprogs nano vim
+          # Terminal setup
+          echo "export TERM=xterm-256color" >> /etc/profile
+          echo "export TERM=xterm-256color" >> /home/builder/.bashrc
+          ln -s /usr/share/terminfo/x/xterm-256color /usr/share/terminfo/xterm 2>/dev/null
           
-          # Ensure terminal capabilities
-          ln -s /usr/share/terminfo/x/xterm-256color /usr/share/terminfo/xterm || true
-          
-          # Create loop devices if needed
+          # Create loop devices
           for i in {0..7}; do
-              [ -e /dev/loop$i ] || mknod -m 0660 /dev/loop$i b 7 $i
+            [ -e /dev/loop$i ] || mknod /dev/loop$i b 7 $i
           done
-          [ -e /dev/loop-control ] || mknod -m 0660 /dev/loop-control c 10 237
-
-      - name: Install remote access tools
-        run: |
+          
           # Install Gotty
-          curl -sSfL "https://github.com/yudai/gotty/releases/download/v1.0.1/gotty_linux_amd64.tar.gz" -o /tmp/gotty.tar.gz
-          tar -xzf /tmp/gotty.tar.gz -C /usr/bin
-          rm /tmp/gotty.tar.gz
+          curl -sSL -o /usr/bin/gotty https://github.com/yudai/gotty/releases/download/v1.0.1/gotty_linux_amd64
           chmod +x /usr/bin/gotty
           
-          # Install Ngrok
-          curl -sSfL "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz" -o /tmp/ngrok.tgz
-          tar -xzf /tmp/ngrok.tgz -C /usr/bin
-          rm /tmp/ngrok.tgz
+          # Download and configure Ngrok
+          curl -sSL -o ngrok.tgz https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz
+          tar -xzf ngrok.tgz -C /usr/bin
+          rm ngrok.tgz
           chmod +x /usr/bin/ngrok
-          ngrok config add-authtoken ${{ secrets.NGROK_TOKEN }}
-
-      - name: Launch services
-        run: |
-          # Start Gotty
-          sudo -u builder -H bash -c "gotty -p 8080 -w --reconnect bash >/dev/null 2>&1 &" 
+          ngrok config add-authtoken "${NGROK_TOKEN}"
           
-          # Start Ngrok tunnel
-          ngrok http 8080 --log=stdout --domain=${{ secrets.NGROK_DOMAIN }} > ngrok.log 2>&1 &
+          # Run Gotty and Ngrok
+          chown -R builder:builder /home/builder
+          sudo -u builder -H bash -c "gotty -p 8080 -w --reconnect bash >/dev/null 2>&1 &"
+          ngrok http 8080 --domain="${NGROK_DOMAIN}" > ngrok.log 2>&1 &
           
-          # Display connection info
+          # Wait for services to start
           sleep 5
           echo "=================================================================="
+          echo "Web Terminal: https://${NGROK_DOMAIN}"
+          echo "SSH Access:   ssh builder@${NGROK_DOMAIN} -p 443"
+          echo "Password:     1234"
+          echo "=================================================================="
+          '
+          
+      - name: Access instructions
+        run: |
           echo "Web Terminal URL: https://${{ secrets.NGROK_DOMAIN }}"
           echo "SSH Access: ssh builder@${{ secrets.NGROK_DOMAIN }} -p 443"
           echo "Password: 1234"
-          echo "=================================================================="
-
+          echo "Maintaining session for 4 hours..."
+          
       - name: Maintain session
-        run: sleep 4h
+        timeout-minutes: 240
+        run: |
+          docker exec arch-build-env sleep 4h
