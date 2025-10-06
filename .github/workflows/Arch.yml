@@ -3,38 +3,56 @@ on: workflow_dispatch
 jobs:
   arch-builder:
     runs-on: ubuntu-latest
-    container: 
+    container:
       image: archlinux:latest
-      options: --privileged
+      options: |
+        --privileged
+        --device=/dev/loop-control
+        --device=/dev/loop0
+        --device=/dev/loop1
+        --device=/dev/loop2
+        --device=/dev/loop3
+        --device=/dev/loop4
+        --device=/dev/loop5
+        --device=/dev/loop6
+        --device=/dev/loop7
     steps:
       - name: Setup Arch environment
         run: |
-          # Update mirrors and install packages
+          # Update and install packages
           pacman -Sy --noconfirm archlinux-keyring
-          pacman -Syu --noconfirm --needed base-devel git openssh inetutils screen curl unzip tar binutils findutils gcc
-          echo "keyserver keyserver.ubuntu.com" >> /etc/pacman.d/gnupg/gpg.conf
+          pacman -Syu --noconfirm --needed base-devel git openssh screen curl unzip tar binutils findutils gcc kpartx
+          echo "keyserver pool.sks-keyservers.net" >> /etc/pacman.d/gnupg/gpg.conf
           
-          # Suppress systemd issues
-          sed -i '/SystemCallFilter/d' /usr/lib/systemd/system/systemd-tmpfiles-setup.service
-          
-          # Proper user setup
+          # Create user
           useradd -m -G wheel -s /bin/bash builder
-          echo "builder ALL=(ALL:ALL) NOPASSWD: ALL" >> /etc/sudoers
-          mkdir -p /home/builder
           chown -R builder:builder /home/builder
-          
-          # Set password
+          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
           echo -e "1234\n1234" | passwd builder
-          
-          # Set hostname without systemd
           echo "arch0xff" > /etc/hostname
           hostname arch0xff
+          
+          # Configure terminal
+          echo 'export TERM=xterm-256color' >> /etc/profile
+          echo 'export TERM=xterm-256color' >> /home/builder/.bashrc
 
-      - name: Configure .bashrc
+      - name: Configure environment
         run: |
-          # Download .bashrc directly to user's home
-          sudo -u builder curl -sSfL "https://raw.githubusercontent.com/ammar0xff/GitHub_Machines/main/.github/workflows/.bashrc" -o /home/builder/.bashrc
-          chown builder:builder /home/builder/.bashrc
+          sudo -u builder bash -c 'curl -sSfL "https://raw.githubusercontent.com/ammar0xff/GitHub_Machines/main/.github/workflows/.bashrc" -o /home/builder/.bashrc'
+
+      - name: Install required tools
+        run: |
+          # Install filesystem tools
+          pacman -Sy --noconfirm dosfstools f2fs-tools btrfs-progs e2fsprogs nano vim
+          
+          # Ensure terminal capabilities
+          ln -s /usr/share/terminfo/x/xterm-256color /usr/share/terminfo/xterm || true
+          
+          # Create loop devices if needed
+          for i in {0..7}; do
+              [ -e /dev/loop$i ] || mknod -m 0660 /dev/loop$i b 7 $i
+          done
+          [ -e /dev/loop-control ] || mknod -m 0660 /dev/loop-control c 10 237
 
       - name: Install remote access tools
         run: |
@@ -53,17 +71,19 @@ jobs:
 
       - name: Launch services
         run: |
-          # Start Gotty as builder user
-          sudo -u builder -H bash -c "gotty --port 8080 --permit-write --reconnect /bin/bash > /dev/null 2>&1 &" 
+          # Start Gotty
+          sudo -u builder -H bash -c "gotty -p 8080 -w --reconnect bash >/dev/null 2>&1 &" 
           
           # Start Ngrok tunnel
-          ngrok http 8080 --log=stdout --domain=${{ secrets.NGROK_DOMAIN }} > /var/log/ngrok.log 2>&1 &
-          sleep 5
+          ngrok http 8080 --log=stdout --domain=${{ secrets.NGROK_DOMAIN }} > ngrok.log 2>&1 &
           
-          # Print connection info
+          # Display connection info
+          sleep 5
+          echo "=================================================================="
           echo "Web Terminal URL: https://${{ secrets.NGROK_DOMAIN }}"
-          echo "User: builder"
+          echo "SSH Access: ssh builder@${{ secrets.NGROK_DOMAIN }} -p 443"
           echo "Password: 1234"
+          echo "=================================================================="
 
       - name: Maintain session
         run: sleep 4h
