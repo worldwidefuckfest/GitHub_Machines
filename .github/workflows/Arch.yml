@@ -4,26 +4,35 @@ jobs:
   arch-builder:
     runs-on: ubuntu-latest
     steps:
-      - name: Set up QEMU static
+      - name: Set up builder environment
         run: |
           sudo apt-get update
           sudo apt-get install -y qemu-user-static
           docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
           
-      - name: Build and run privileged container
+      - name: Create Dockerfile
         run: |
-          # Create Dockerfile
-          cat <<EOF > Dockerfile
+          cat << 'EOF' > Dockerfile
           FROM archlinux:latest
-          RUN pacman -Sy --noconfirm archlinux-keyring && \
-              pacman -Syu --noconfirm --needed base-devel git openssh curl sudo wget dosfstools \
-                     f2fs-tools btrfs-progs e2fsprogs nano screen kpartx gcc make findutils tar unzip vim
+          RUN pacman -Sy --noconfirm archlinux-keyring base-devel git
+          RUN useradd -m -s /bin/bash builder && \
+              echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+          USER builder
+          WORKDIR /home/builder
+          RUN git clone https://aur.archlinux.org/multipath-tools.git && \
+              cd multipath-tools && \
+              makepkg -si --noconfirm
+          USER root
+          RUN pacman -Syu --noconfirm --needed openssh curl sudo wget \
+                     dosfstools f2fs-tools btrfs-progs e2fsprogs \
+                     nano screen gcc make findutils tar unzip vim
           EOF
           
-          # Build image with host's kernel modules
-          docker build -t arch-builder .
-          
-          # Run container with privileged loop devices
+      - name: Build container
+        run: docker build -t arch-builder .
+        
+      - name: Run container
+        run: |
           docker run -d --name arch-build-env \
             --device /dev/loop-control \
             --device /dev/loop0 \
@@ -38,13 +47,12 @@ jobs:
             -e NGROK_TOKEN=${{ secrets.NGROK_TOKEN }} \
             -e NGROK_DOMAIN=${{ secrets.NGROK_DOMAIN }} \
             arch-builder tail -f /dev/null
-          
+            
       - name: Configure container environment
         run: |
           docker exec arch-build-env bash -c '
-          # Setup user and environment
-          useradd -m -G wheel -s /bin/bash builder
-          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+          # Setup user environment
+          usermod -aG wheel builder
           echo -e "1234\n1234" | passwd builder
           echo "arch0xff" > /etc/hostname
           hostname arch0xff
@@ -53,29 +61,30 @@ jobs:
           echo "export TERM=xterm-256color" >> /etc/profile
           echo "export TERM=xterm-256color" >> /home/builder/.bashrc
           ln -s /usr/share/terminfo/x/xterm-256color /usr/share/terminfo/xterm 2>/dev/null
+          chown -R builder:builder /home/builder
           
           # Create loop devices
           for i in {0..7}; do
-            [ -e /dev/loop$i ] || mknod /dev/loop$i b 7 $i
+            mknod -m 0660 /dev/loop$i b 7 $i
+            mknod -m 0660 /dev/loop$i-part b 259 $i
           done
           
           # Install Gotty
           curl -sSL -o /usr/bin/gotty https://github.com/yudai/gotty/releases/download/v1.0.1/gotty_linux_amd64
           chmod +x /usr/bin/gotty
           
-          # Download and configure Ngrok
+          # Install and configure Ngrok
           curl -sSL -o ngrok.tgz https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz
           tar -xzf ngrok.tgz -C /usr/bin
           rm ngrok.tgz
           chmod +x /usr/bin/ngrok
           ngrok config add-authtoken "${NGROK_TOKEN}"
           
-          # Run Gotty and Ngrok
-          chown -R builder:builder /home/builder
-          sudo -u builder -H bash -c "gotty -p 8080 -w --reconnect bash >/dev/null 2>&1 &"
+          # Run services
+          sudo -u builder -H bash -c "gotty -p 8080 -w --reconnect --reconnect-time 1 bash >/dev/null 2>&1 &"
           ngrok http 8080 --domain="${NGROK_DOMAIN}" > ngrok.log 2>&1 &
           
-          # Wait for services to start
+          # Wait and display info
           sleep 5
           echo "=================================================================="
           echo "Web Terminal: https://${NGROK_DOMAIN}"
