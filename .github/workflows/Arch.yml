@@ -1,4 +1,4 @@
-name: Arch Linux Temporary Builder
+name: Arch Linux Builder
 on: workflow_dispatch
 jobs:
   arch-builder:
@@ -7,36 +7,62 @@ jobs:
       image: archlinux:latest
       options: --privileged
     steps:
-      - name: Initialize Arch Linux
+      - name: Setup Arch environment
         run: |
-          pacman -Sy --noconfirm
-          pacman -S --noconfirm base-devel git openssh inetutils which
-          useradd -m -G wheel builder
-          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
-          echo "builder:1234" | chpasswd
-          hostnamectl set-hostname arch0xff
+          # Update mirrors and install packages
+          pacman -Sy --noconfirm archlinux-keyring
+          pacman -Syu --noconfirm --needed base-devel git openssh inetutils screen curl unzip tar binutils findutils gcc
           
-      - name: Set up builder environment
+          # Suppress systemd hook warnings
+          sed -i '/SystemCallFilter/d' /usr/lib/systemd/system/systemd-tmpfiles-setup.service
+          
+          # Create user
+          useradd -m -G wheel -s /bin/bash builder
+          echo "builder ALL=(ALL:ALL) NOPASSWD: ALL" >> /etc/sudoers
+          
+          # Set password
+          echo -e "1234\n1234" | passwd builder
+          
+          # Set hostname without systemd
+          echo "arch0xff" > /etc/hostname
+          hostname arch0xff
+          
+          # Create .bashrc template
+          touch /home/builder/.bashrc
+
+      - name: Configure shell environment
         run: |
-          su - builder -c 'git clone https://github.com/ammar0xff/GitHub_Machines .build-temp'
-          mv /home/builder/.build-temp/.bashrc /home/builder/.bashrc
+          sudo -u builder bash -c 'git clone https://github.com/ammar0xff/GitHub_Machines repo-temp'
+          mv /home/builder/repo-temp/.github/workflows/.bashrc /home/builder/.bashrc
           chown builder:builder /home/builder/.bashrc
-          
+          rm -rf /home/builder/repo-temp
+
       - name: Install remote access tools
         run: |
-          pacman -S --noconfirm screen
-          curl -sSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz | tar xz -C /usr/bin
-          curl -sSL https://github.com/yudai/gotty/releases/download/v1.0.1/gotty_linux_amd64.tar.gz | tar xz -C /usr/bin
-          ngrok config add-authtoken ${{ secrets.NGROK_TOKEN }}
+          # Install Gotty
+          curl -sSfL "https://github.com/yudai/gotty/releases/download/v1.0.1/gotty_linux_amd64.tar.gz" -o /tmp/gotty.tar.gz
+          tar -xzf /tmp/gotty.tar.gz -C /usr/bin
+          rm /tmp/gotty.tar.gz
           
+          # Install Ngrok
+          curl -sSfL "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz" -o /tmp/ngrok.tgz
+          tar -xzf /tmp/ngrok.tgz -C /usr/bin
+          rm /tmp/ngrok.tgz
+          ngrok config add-authtoken ${{ secrets.NGROK_TOKEN }}
+
       - name: Launch services
         run: |
-          screen -dmS gotty bash -c "sudo -u builder gotty -w bash"
-          screen -dmS ngrok bash -c "ngrok http --domain=${{ secrets.NGROK_DOMAIN }} 8080"
+          # Start Gotty as builder user
+          sudo -u builder -H bash -c "gotty --port 8080 --permit-write --reconnect /bin/bash > /dev/null 2>&1 &" 
           
-      - name: Maintain connection
-        run: |
-          echo "Instance Portal: ${{ secrets.NGROK_DOMAIN }}"
-          echo "Username: builder"
+          # Start Ngrok tunnel
+          ngrok http 8080 --log=stdout --domain=${{ secrets.NGROK_DOMAIN }} > /var/log/ngrok.log 2>&1 &
+          sleep 5  # Allow services to start
+          
+          # Print connection info (masked in logs)
+          echo "Web Terminal URL: https://${{ secrets.NGROK_DOMAIN }}"
+          echo "User: builder"
           echo "Password: 1234"
-          sleep infinity
+
+      - name: Maintain session
+        run: sleep 4h  # Max 6h GitHub limit
