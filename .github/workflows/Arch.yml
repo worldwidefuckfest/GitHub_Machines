@@ -1,0 +1,42 @@
+name: Arch Linux Temporary Builder
+on: workflow_dispatch
+jobs:
+  arch-builder:
+    runs-on: ubuntu-latest
+    container: 
+      image: archlinux:latest
+      options: --privileged
+    steps:
+      - name: Initialize Arch Linux
+        run: |
+          pacman -Sy --noconfirm
+          pacman -S --noconfirm base-devel git openssh inetutils which
+          useradd -m -G wheel builder
+          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+          echo "builder:1234" | chpasswd
+          hostnamectl set-hostname arch0xff
+          
+      - name: Set up builder environment
+        run: |
+          su - builder -c 'git clone https://github.com/ammar0xff/GitHub_Machines .build-temp'
+          mv /home/builder/.build-temp/.bashrc /home/builder/.bashrc
+          chown builder:builder /home/builder/.bashrc
+          
+      - name: Install remote access tools
+        run: |
+          pacman -S --noconfirm screen
+          curl -sSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz | tar xz -C /usr/bin
+          curl -sSL https://github.com/yudai/gotty/releases/download/v1.0.1/gotty_linux_amd64.tar.gz | tar xz -C /usr/bin
+          ngrok config add-authtoken ${{ secrets.NGROK_TOKEN }}
+          
+      - name: Launch services
+        run: |
+          screen -dmS gotty bash -c "sudo -u builder gotty -w bash"
+          screen -dmS ngrok bash -c "ngrok http --domain=${{ secrets.NGROK_DOMAIN }} 8080"
+          
+      - name: Maintain connection
+        run: |
+          echo "Instance Portal: ${{ secrets.NGROK_DOMAIN }}"
+          echo "Username: builder"
+          echo "Password: 1234"
+          sleep infinity
